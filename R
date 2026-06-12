@@ -1,0 +1,532 @@
+install.packages("tidyverse")
+install.packages("ggplot2")
+install.packages("pheatmap")
+install.packages("ggrepel")
+install.packages("readxl")
+install.packages("survival")
+install.packages("survminer")
+install.packages("ggpubr")
+install.packages("survminer")
+
+
+if (!require("BiocManager")) install.packages("BiocManager")
+BiocManager::install("limma")
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")
+
+library(tidyverse)
+library(readxl)
+
+setwd("C:/Users/User/Desktop/proteomics/projectSUMO/AML_project")
+proteomics_raw <- read_excel("Supplemental Table 3.xlsx", sheet = "TMT protein abundance")
+clinical_raw <- read_excel("Supplemental Table 2.xlsx", sheet = "Clinical Information")
+
+dim(proteomics_raw)
+head(proteomics_raw[, 1:5])
+colnames(clinical_raw)
+
+proteomics_raw %>% column_to_rownames(var = colnames(proteomics_raw)[1])
+missing_pct <- rowSums(is.na(proteomics_raw)) / ncol(proteomics_raw) * 100
+hist(missing_pct, main = "% missing values per protein", xlab = "% NA")
+proteomics_clean <- proteomics_raw[missing_pct < 50, ]
+cat("Proteins after filtration:", nrow(proteomics_clean), "\n")
+
+proteomics_clean <- proteomics_clean %>%
+  mutate(across(c(`100232`:`989176`, ends_with("_sd")), 
+                ~as.numeric(gsub(",", ".", as.character(.)))))
+proteomics_clean <- proteomics_clean %>%
+  mutate(across(where(is.numeric), 
+                ~ifelse(is.na(.), min(., na.rm = TRUE) - 0.5, .)))
+sum(is.na(proteomics_clean))
+glimpse(proteomics_clean)
+
+
+all_cols <- colnames(proteomics_clean)
+healthy_cols <- all_cols[grepl("ND", 
+                               all_cols, ignore.case = TRUE)]
+patient_cols <- all_cols[!all_cols %in% healthy_cols]
+proteomics_patients <- proteomics_clean[, patient_cols]
+proteomics_healthy <- proteomics_clean[, healthy_cols]
+
+
+
+
+library(ggplot2)
+
+proteomics_mat <- proteomics_clean %>%
+  column_to_rownames("Protein")
+
+dim(proteomics_mat)   
+colnames(proteomics_mat)
+
+all_cols <- colnames(proteomics_mat)
+sample_cols <- all_cols[!grepl("_sd$|^prot_", all_cols)]
+cat("Sapmles for analysis:", length(sample_cols), "\n")
+proteomics_mat_clean <- proteomics_mat[, sample_cols]
+healthy_cols <- sample_cols[grepl("ND", sample_cols)]
+patient_cols <- sample_cols[!sample_cols %in% healthy_cols]
+
+cat("Patients:", length(patient_cols), "\n")
+cat("Healthy:", length(healthy_cols), "\n")
+
+pca_input <- proteomics_mat_clean %>%
+  mutate(across(everything(), as.numeric)) %>%  t()
+pca_input <- pca_input[, colSums(is.na(pca_input)) == 0]
+pca_result <- prcomp(pca_input, scale. = TRUE, center = TRUE)
+
+
+pc1_var <- round(summary(pca_result)$importance[2, 1] * 100, 1)
+pc2_var <- round(summary(pca_result)$importance[2, 2] * 100, 1)
+
+cat("PC1:", pc1_var, "%\n")
+cat("PC2:", pc2_var, "%\n")
+
+pca_df <- as.data.frame(pca_result$x[, 1:2]) %>%
+  rownames_to_column("Sample") %>%
+  mutate(Group = ifelse(Sample %in% healthy_cols, "Healthy", "AML"))
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = c("AML" = "#E74C3C", "Healthy" = "#2ECC71")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "PCA of AML and healthy bone marrow proteomes",
+       x = paste0("PC1 (", pc1_var, "%)"),
+       y = paste0("PC2 (", pc2_var, "%)")) +
+  theme(legend.title = element_blank())
+
+
+
+
+
+#SUMO
+sumo_proteins <- c(
+  "SAE1",    # E1 
+  "UBA2",    # E1 (SAE2)
+  "UBE2I",   # E2 (UBC9) 
+  "PIAS1", "PIAS2", "PIAS3", "PIAS4",  # E3 ligases
+  "SENP1", "SENP2", "SENP3",            # deSUMOylases
+  "SENP5", "SENP6", "SENP7",            # deSUMOylases
+  "SUMO1", "SUMO2", "SUMO3"             # SUMO proteins
+)
+sumo_found <- proteomics_clean %>%
+  filter(Protein %in% sumo_proteins)
+cat("Found SUMO proteins:", nrow(sumo_found), "out of", length(sumo_proteins), "\n")
+print(sumo_found$Protein)
+
+
+library(pheatmap)
+sumo_found <- proteomics_clean %>%
+  filter(Protein %in% sumo_proteins) %>%
+  column_to_rownames("Protein")
+
+cat("Found:", nrow(sumo_found), "\n")
+print(rownames(sumo_found))
+
+sumo_mat <- sumo_found[, sample_cols] %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+cat("Matrix size:", dim(sumo_mat), "\n")
+annotation_col <- data.frame(
+  Group = ifelse(colnames(sumo_mat) %in% healthy_cols, "Healthy", "AML"),
+  row.names = colnames(sumo_mat)
+)
+
+ann_colors <- list(
+  Group = c("AML" = "#E74C3C", "Healthy" = "#2ECC71")
+)
+pheatmap(
+  sumo_mat,
+  annotation_col = annotation_col,
+  annotation_colors = ann_colors,
+  scale = "row",
+  clustering_method = "ward.D2",
+  show_colnames = FALSE,
+  main = "SUMO pathway proteins: AML vs Healthy",
+  fontsize_row = 11,
+  color = colorRampPalette(c("#3498DB", "white", "#E74C3C"))(100)
+)
+
+
+
+
+
+head(clinical_raw)
+clinical <- clinical_raw %>%
+  select(`UPN`, 
+         `RISK (ELN2017)`, 
+         `OS months  4.30.13`, 
+         `EFS months    4.30.13`,
+         `FLT3`,
+         `NPM1`,
+         `TP53`,
+         `DNMT3A`) %>%
+  rename(
+    ELN_risk = `RISK (ELN2017)`,
+    OS_months = `OS months  4.30.13`,
+    EFS_months = `EFS months    4.30.13`
+  ) %>%
+  mutate(UPN = as.character(UPN))
+
+table(clinical$ELN_risk)
+head(clinical)
+
+
+
+
+
+
+colnames(clinical)
+
+sumo_long <- sumo_found[, patient_cols] %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "UPN", values_to = "Expression") %>%
+  left_join(clinical, by = "UPN") %>%
+  filter(!is.na(ELN_risk))
+
+ggplot(sumo_long, aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+  scale_fill_manual(values = c(
+    "Favorable"    = "#2ECC71",
+    "Intermediate" = "#F39C12",
+    "Adverse"      = "#E74C3C"
+  )) +
+  facet_wrap(~Protein, scales = "free_y", ncol = 4) +
+  theme_minimal(base_size = 11) +
+  labs(title = "SUMO pathway proteins by ELN 2017 risk",
+       x = "ELN Risk", 
+       y = "Protein level (log2)") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+
+
+
+
+
+
+library(ggpubr)
+sumo_long %>%
+  filter(Protein %in% c("UBE2I", "SENP5")) %>%
+  filter(!is.na(ELN_risk)) %>%
+  ggplot(aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 2.5, alpha = 0.8) +
+  scale_fill_manual(values = c(
+    "Favorable"    = "#2ECC71",
+    "Intermediate" = "#F39C12",
+    "Adverse"      = "#E74C3C"
+  )) +
+  facet_wrap(~Protein, scales = "free_y") +
+  stat_compare_means(
+    comparisons = list(
+      c("Favorable", "Adverse"),
+      c("Favorable", "Intermediate"),
+      c("Intermediate", "Adverse")
+    ),
+    method = "wilcox.test",
+    label = "p.signif"
+  ) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Key SUMO pathway proteins by ELN 2017 risk",
+       x = "ELN Risk Group",
+       y = "Protein level (log2, TMT)") +
+  theme(legend.position = "none")
+
+
+
+
+
+
+colnames(clinical)
+
+
+ggplot(sumo_long, aes(x = EFS_months, y = Expression)) +
+  geom_point(alpha = 0.6, size = 1.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "#E74C3C", linewidth = 0.8) +
+  facet_wrap(~Protein, scales = "free_y", ncol = 4) +
+  theme_minimal(base_size = 11) +
+  labs(title = "SUMO pathway proteins vs EFS (months)",
+       x = "EFS (months)", 
+       y = "Protein level (log2)") +
+  theme(strip.text = element_text(face = "bold"))
+
+
+
+sumo_long <- sumo_long %>%
+  mutate(EFS_group = ifelse(EFS_months > 12, "EFS > 12 months", "EFS ≤ 12 months"))
+
+ggplot(sumo_long, aes(x = EFS_group, y = Expression, fill = EFS_group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 1, alpha = 0.5) +
+  facet_wrap(~Protein, scales = "free_y", ncol = 4) +
+  scale_fill_manual(values = c("EFS > 12 months" = "#2ECC71", 
+                               "EFS ≤ 12 months" = "#E74C3C")) +
+  theme_minimal(base_size = 11) +
+  labs(title = "SUMO pathway proteins by EFS groups",
+       x = NULL, 
+       y = "Protein level (log2)") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+sumo_long %>%
+  filter(Protein %in% c("UBE2I", "SUMO2")) %>%
+  filter(!is.na(EFS_months)) %>%
+  mutate(EFS_group = ifelse(EFS_months > 12, "EFS > 12 months", "EFS ≤ 12 months")) %>%
+  ggplot(aes(x = EFS_group, y = Expression, fill = EFS_group)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 2, alpha = 0.8) +
+  facet_wrap(~Protein, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = c("EFS > 12 months" = "#2ECC71", 
+                               "EFS ≤ 12 months" = "#E74C3C")) +
+  stat_compare_means(method = "wilcox.test", label = "p.signif") +
+  theme_minimal(base_size = 14) +
+  labs(title = "Key SUMO pathway proteins by EFS group",
+       x = NULL,
+       y = "Protein level (log2, TMT)") +
+  theme(legend.position = "none")
+
+
+
+
+
+
+
+clinical <- clinical %>%
+  mutate(
+    FLT3_status  = ifelse(is.na(FLT3),  "Wild-type", "Mutated"),
+    NPM1_status  = ifelse(is.na(NPM1),  "Wild-type", "Mutated"),
+    TP53_status  = ifelse(is.na(TP53),  "Wild-type", "Mutated"),
+    DNMT3A_status = ifelse(is.na(DNMT3A), "Wild-type", "Mutated")
+  )
+
+table(clinical$FLT3_status)
+table(clinical$NPM1_status)
+table(clinical$TP53_status)
+
+sumo_long <- sumo_found[, patient_cols] %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "UPN", values_to = "Expression") %>%
+  left_join(clinical, by = "UPN")
+
+sumo_mut <- sumo_long %>%
+  pivot_longer(
+    cols = c(FLT3_status, NPM1_status, TP53_status, DNMT3A_status),
+    names_to = "Gene",
+    values_to = "Status"
+  ) %>%
+  mutate(Gene = gsub("_status", "", Gene))
+ggplot(sumo_mut, aes(x = Status, y = Expression, fill = Status)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+  scale_fill_manual(values = c("Mutated" = "#E74C3C", "Wild-type" = "#95A5A6")) +
+  facet_grid(Protein ~ Gene, scales = "free_y") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif") +
+  theme_minimal(base_size = 10) +
+  labs(title = "SUMO pathway proteins by mutation status",
+       x = "", y = "Protein level (log2)") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+sumo_long %>%
+  filter(!is.na(EFS_months)) %>%
+  group_by(Protein) %>%
+  summarise(
+    cor = cor(Expression, EFS_months, method = "spearman", use = "complete.obs"),
+    p_value = cor.test(Expression, EFS_months, method = "spearman")$p.value
+  ) %>%
+  arrange(p_value) %>%
+  print()
+
+library(survival)
+library(survminer)
+
+
+senp6_data <- sumo_long %>%
+  filter(Protein == "SENP6") %>%
+  filter(!is.na(OS_months)) %>%
+  mutate(
+    SENP6_group = ifelse(Expression >= median(Expression, na.rm = TRUE), 
+                         "High SENP6", "Low SENP6"),
+    OS_months = as.numeric(OS_months))
+colnames(clinical)
+
+
+summary(clinical$OS_months)
+summary(clinical$EFS_months)
+sum(is.na(clinical$OS_months))
+sum(is.na(clinical$EFS_months))
+colnames(clinical_raw)[1:20]
+clinical <- clinical %>%
+  left_join(
+    clinical_raw %>%
+      select(UPN, OS_status = `Expired?  4.30.13`) %>%
+      mutate(UPN = as.character(UPN)),
+    by = "UPN"
+  )
+table(clinical$OS_status)
+sum(is.na(clinical$OS_status))
+clinical_raw %>% 
+  select(UPN, `Expired?  4.30.13`) %>% 
+  head(20)
+clinical <- clinical %>%
+  mutate(OS_status = ifelse(OS_status == "*", 1, 0))
+sumo_long <- sumo_found[, patient_cols] %>%
+  rownames_to_column("Protein") %>%
+  pivot_longer(-Protein, names_to = "UPN", values_to = "Expression") %>%
+  left_join(clinical, by = "UPN")
+senp6_data <- sumo_long %>%
+  filter(Protein == "SENP6") %>%
+  filter(!is.na(OS_months), !is.na(OS_status)) %>%
+  mutate(
+    SENP6_group = ifelse(Expression >= median(Expression, na.rm = TRUE),
+                         "High SENP6", "Low SENP6"),
+    OS_months = as.numeric(OS_months),
+    OS_status = as.numeric(OS_status)
+  )
+km_fit <- survfit(Surv(OS_months, OS_status) ~ SENP6_group, 
+                  data = senp6_data)
+
+ggsurvplot(
+  km_fit,
+  data = senp6_data,
+  pval = TRUE,
+  pval.method = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  palette = c("#E74C3C", "#3498DB"),
+  legend.labs = c("High SENP6", "Low SENP6"),
+  title = "Overall survival by SENP6 expression in AML",
+  xlab = "Time (months)",
+  ylab = "Survival probability",
+  ggtheme = theme_minimal(base_size = 14)
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+library(limma)
+
+senp6_expr <- proteomics_mat_clean["SENP6", patient_cols]
+senp6_median <- median(as.numeric(senp6_expr), na.rm = TRUE)
+
+senp6_groups <- ifelse(as.numeric(senp6_expr) >= senp6_median, 
+                       "High", "Low")
+patient_matrix <- proteomics_mat_clean[, patient_cols] %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+patient_matrix <- patient_matrix[complete.cases(patient_matrix), ]
+design <- model.matrix(~0 + factor(senp6_groups))
+colnames(design) <- c("High", "Low")
+
+fit <- lmFit(patient_matrix, design)
+contrast_mat <- makeContrasts(High - Low, levels = design)
+fit2 <- contrasts.fit(fit, contrast_mat)
+fit2 <- eBayes(fit2)
+
+results <- topTable(fit2, number = Inf, adjust.method = "BH") %>%
+  rownames_to_column("Protein")
+
+
+
+cat("Relevant proteins (FDR < 0.05):", sum(results$adj.P.Val < 0.05), "\n")
+cat("top 10:\n")
+head(results, 10)
+
+
+
+
+
+# Volcano plot
+library(ggrepel)
+
+results <- results %>%
+  mutate(
+    significant = adj.P.Val < 0.05 & abs(logFC) > 0.2,
+    SUMO = Protein %in% sumo_proteins,
+    label = case_when(
+      SUMO ~ Protein,
+      Protein %in% head(results$Protein, 15) ~ Protein,
+      TRUE ~ ""
+    ),
+    direction = case_when(
+      logFC > 0.2 & adj.P.Val < 0.05 ~ "Up in High SENP6",
+      logFC < -0.2 & adj.P.Val < 0.05 ~ "Down in High SENP6",
+      TRUE ~ "NS"
+    )
+  )
+
+ggplot(results, aes(x = logFC, y = -log10(adj.P.Val),
+                    color = direction, label = label,
+                    size = SUMO)) +
+  geom_point(alpha = 0.6) +
+  geom_text_repel(size = 3, max.overlaps = 25,
+                  fontface = ifelse(results$SUMO, "bold", "plain")) +
+  scale_color_manual(values = c(
+    "Up in High SENP6"   = "#E74C3C",
+    "Down in High SENP6" = "#3498DB",
+    "NS"                 = "grey70"
+  )) +
+  scale_size_manual(values = c("TRUE" = 4, "FALSE" = 1.5)) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", alpha = 0.5) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Differential proteome: High vs Low SENP6 AML",
+       subtitle = "SUMO pathway proteins in bold",
+       x = "log2 Fold Change", 
+       y = "-log10(adjusted p-value)",
+       color = "Direction") +
+  guides(size = "none")
+
+ggsave("volcano_SENP6.pdf", width = 10, height = 8)
+
+# Pathway enrichment
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+up_proteins <- results %>%
+  filter(adj.P.Val < 0.05, logFC > 0.2) %>%
+  pull(Protein)
+
+down_proteins <- results %>%
+  filter(adj.P.Val < 0.05, logFC < -0.2) %>%
+  pull(Protein)
+
+cat("Up in High SENP6:", length(up_proteins), "\n")
+cat("Down in High SENP6:", length(down_proteins), "\n")
+
+# Converting
+gene_ids_up <- bitr(up_proteins, fromType = "SYMBOL",
+                    toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# GO enrichment
+go_up <- enrichGO(gene = gene_ids_up$ENTREZID,
+                  OrgDb = org.Hs.eg.db,
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+dotplot(go_up, showCategory = 15,
+        title = "GO Biological Processes: up in High SENP6 AML") +
+  theme(axis.text.y = element_text(size = 10))
