@@ -17,6 +17,7 @@ BiocManager::install("org.Hs.eg.db")
 library(tidyverse)
 library(readxl)
 
+# ── DATA LOADING ──────────────────────────────────────────
 setwd("C:/Users/User/Desktop/proteomics/projectSUMO/AML_project")
 proteomics_raw <- read_excel("Supplemental Table 3.xlsx", sheet = "TMT protein abundance")
 clinical_raw <- read_excel("Supplemental Table 2.xlsx", sheet = "Clinical Information")
@@ -25,6 +26,7 @@ dim(proteomics_raw)
 head(proteomics_raw[, 1:5])
 colnames(clinical_raw)
 
+# ── PROTEOMICS PRE-PROCESSING ─────────────────────────────
 proteomics_raw %>% column_to_rownames(var = colnames(proteomics_raw)[1])
 missing_pct <- rowSums(is.na(proteomics_raw)) / ncol(proteomics_raw) * 100
 hist(missing_pct, main = "% missing values per protein", xlab = "% NA")
@@ -50,7 +52,7 @@ proteomics_healthy <- proteomics_clean[, healthy_cols]
 
 
 
-
+# ── SAMPLE COLUMN CLASSIFICATION ──────────────────────────
 library(ggplot2)
 
 proteomics_mat <- proteomics_clean %>%
@@ -69,6 +71,7 @@ patient_cols <- sample_cols[!sample_cols %in% healthy_cols]
 cat("Patients:", length(patient_cols), "\n")
 cat("Healthy:", length(healthy_cols), "\n")
 
+# ──  PCA ───────────────────────────────────────────────────
 pca_input <- proteomics_mat_clean %>%
   mutate(across(everything(), as.numeric)) %>%  t()
 pca_input <- pca_input[, colSums(is.na(pca_input)) == 0]
@@ -98,7 +101,7 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
 
 
 
-#SUMO
+# ── SUMO PATHWAY PROTEINS ─────────────────────────────────
 sumo_proteins <- c(
   "SAE1",    # E1 
   "UBA2",    # E1 (SAE2)
@@ -113,7 +116,7 @@ sumo_found <- proteomics_clean %>%
 cat("Found SUMO proteins:", nrow(sumo_found), "out of", length(sumo_proteins), "\n")
 print(sumo_found$Protein)
 
-
+# ── SUMO HEATMAP (AML vs Healthy) ─────────────────────────
 library(pheatmap)
 sumo_found <- proteomics_clean %>%
   filter(Protein %in% sumo_proteins) %>%
@@ -149,7 +152,7 @@ pheatmap(
 
 
 
-
+# ── CLINICAL DATA ─────────────────────────────────────────
 head(clinical_raw)
 clinical <- clinical_raw %>%
   select(`UPN`, 
@@ -207,7 +210,7 @@ ggplot(sumo_long, aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
 
 
 
-
+# ── SUMO PROTEINS × ELN RISK ──────────────────────────────
 library(ggpubr)
 sumo_long %>%
   filter(Protein %in% c("UBE2I", "SENP5")) %>%
@@ -240,7 +243,7 @@ sumo_long %>%
 
 
 
-
+# ── SUMO PROTEINS × Event free survival ───────────────────────────────────
 colnames(clinical)
 
 
@@ -295,6 +298,7 @@ sumo_long %>%
 
 
 
+# Create binary mutation status variables
 clinical <- clinical %>%
   mutate(
     FLT3_status  = ifelse(is.na(FLT3),  "Wild-type", "Mutated"),
