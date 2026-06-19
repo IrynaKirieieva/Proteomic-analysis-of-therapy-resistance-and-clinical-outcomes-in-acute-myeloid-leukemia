@@ -1,3 +1,10 @@
+# ============================================================
+# AML SUMO Pathway Proteomics Analysis
+# # Article: Kramer et. al, Proteomic and Phosphoproteomic Landscapes of Acute Myeloid Leukemia, Blood, 2022 (DOI: 10.1182/blood.2022016033 ). https://ashpublications.org/blood/article/140/13/1533/486036/Proteomic-and-phosphoproteomic-landscapes-of-acute
+# Data: https://proteomics.leylab.org
+# ============================================================
+
+
 install.packages("tidyverse")
 install.packages("ggplot2")
 install.packages("pheatmap")
@@ -14,8 +21,11 @@ BiocManager::install("limma")
 BiocManager::install("clusterProfiler")
 BiocManager::install("org.Hs.eg.db")
 
+
 library(tidyverse)
 library(readxl)
+library(ggplot2)
+library(pheatmap)
 
 # ── DATA LOADING ──────────────────────────────────────────
 setwd("C:/Users/User/Desktop/proteomics/projectSUMO/AML_project")
@@ -25,6 +35,7 @@ clinical_raw <- read_excel("Supplemental Table 2.xlsx", sheet = "Clinical Inform
 dim(proteomics_raw)
 head(proteomics_raw[, 1:5])
 colnames(clinical_raw)
+
 
 # ── PROTEOMICS PRE-PROCESSING ─────────────────────────────
 proteomics_raw %>% column_to_rownames(var = colnames(proteomics_raw)[1])
@@ -36,11 +47,67 @@ cat("Proteins after filtration:", nrow(proteomics_clean), "\n")
 proteomics_clean <- proteomics_clean %>%
   mutate(across(c(`100232`:`989176`, ends_with("_sd")), 
                 ~as.numeric(gsub(",", ".", as.character(.)))))
-proteomics_clean <- proteomics_clean %>%
-  mutate(across(where(is.numeric), 
-                ~ifelse(is.na(.), min(., na.rm = TRUE) - 0.5, .)))
-sum(is.na(proteomics_clean))
-glimpse(proteomics_clean)
+
+
+# ── NA IMPUTATION ────────────────────────────
+# For pre-processed, median-centered TMT data standard left-tail imputation per sample is appropriate
+set.seed(42)
+
+sample_cols_raw <- colnames(proteomics_clean)[
+  !grepl("_sd$|^prot_|^Protein$", colnames(proteomics_clean))
+]
+proteomics_numeric <- proteomics_clean %>%
+  select(Protein, all_of(sample_cols_raw)) %>%
+  column_to_rownames("Protein") %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+
+proteomics_imputed <- proteomics_numeric
+
+for (j in seq_len(ncol(proteomics_imputed))) {
+  col <- proteomics_imputed[, j]
+  na_idx <- is.na(col)
+  if (sum(na_idx) == 0) next
+  
+  col_mean <- mean(col, na.rm = TRUE)
+  col_sd   <- sd(col, na.rm = TRUE)
+  
+  proteomics_imputed[na_idx, j] <- rnorm(
+    sum(na_idx),
+    mean = col_mean - 1.8 * col_sd,
+    sd   = 0.3 * col_sd
+  )
+}
+
+cat("NAs after imputation:", sum(is.na(proteomics_imputed)), "\n")
+
+# Verify distribution
+original_vals <- proteomics_numeric[!is.na(proteomics_numeric)]
+imputed_vals  <- proteomics_imputed[is.na(proteomics_numeric)]
+
+data.frame(
+  Intensity = c(original_vals, imputed_vals),
+  Type = c(rep("Original", length(original_vals)),
+           rep("Imputed", length(imputed_vals)))
+) %>%
+  ggplot(aes(x = Intensity, fill = Type, color = Type)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("Original" = "#3498DB", "Imputed" = "#E74C3C")) +
+  scale_color_manual(values = c("Original" = "#3498DB", "Imputed" = "#E74C3C")) +
+  theme_minimal(base_size = 13) +
+  labs(title = "Distribution: original vs imputed values",
+       x = "Intensity (log2, TMT)", y = "Density")
+
+# Convert back
+proteomics_clean <- as.data.frame(proteomics_imputed) %>%
+  rownames_to_column("Protein")
+
+cat("Done. NAs remaining:", sum(is.na(proteomics_clean)), "\n")
+
+
+
+
+
 
 
 all_cols <- colnames(proteomics_clean)
@@ -50,10 +117,7 @@ patient_cols <- all_cols[!all_cols %in% healthy_cols]
 proteomics_patients <- proteomics_clean[, patient_cols]
 proteomics_healthy <- proteomics_clean[, healthy_cols]
 
-
-
 # ── SAMPLE COLUMN CLASSIFICATION ──────────────────────────
-library(ggplot2)
 
 proteomics_mat <- proteomics_clean %>%
   column_to_rownames("Protein")
@@ -71,7 +135,6 @@ patient_cols <- sample_cols[!sample_cols %in% healthy_cols]
 cat("Patients:", length(patient_cols), "\n")
 cat("Healthy:", length(healthy_cols), "\n")
 
-# ── Boxplot of protein intensity distribution across all samples (log2 TMT intensities) ───────────────────────────────────────────────────
 proteomics_mat_clean %>%
   mutate(across(everything(), as.numeric)) %>%
   pivot_longer(everything(), names_to = "Sample", values_to = "Intensity") %>%
@@ -79,12 +142,11 @@ proteomics_mat_clean %>%
   geom_boxplot() +
   theme(axis.text.x = element_text(angle = 90))
 
-# ──  PCA ───────────────────────────────────────────────────
+# ── 4. PCA ───────────────────────────────────────────────────
 pca_input <- proteomics_mat_clean %>%
   mutate(across(everything(), as.numeric)) %>%  t()
 pca_input <- pca_input[, colSums(is.na(pca_input)) == 0]
 pca_result <- prcomp(pca_input, scale. = TRUE, center = TRUE)
-
 
 pc1_var <- round(summary(pca_result)$importance[2, 1] * 100, 1)
 pc2_var <- round(summary(pca_result)$importance[2, 2] * 100, 1)
@@ -107,16 +169,17 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = Group)) +
 
 
 
-
-
 # ── SUMO PATHWAY PROTEINS ─────────────────────────────────
 sumo_proteins <- c(
   "SAE1",    # E1 
   "UBA2",    # E1 (SAE2)
   "UBE2I",   # E2 (UBC9) 
-  "PIAS1", "PIAS2", "PIAS3", "PIAS4",  # E3 ligases
-  "SENP1", "SENP2", "SENP3",            # deSUMOylases
-  "SENP5", "SENP6", "SENP7",            # deSUMOylases
+  "PIAS1", "PIAS2", "PIAS3", "PIAS4", # E3 ligases
+  "RANBP2", "ZNF451", "NSMCE2", "MMS21", "CBX4", # E3 ligases
+  "RNF4", "TRIM28", "TOPORS", "ZMIZ1", "ZMIZ2", # E3 ligases
+  "SENP1", "SENP2", "SENP3", # deSUMOylases
+  "SENP5", "SENP6", "SENP7", # deSUMOylases
+  "DESI1", "DESI2", "USPL1", # deSUMOylases
   "SUMO1", "SUMO2", "SUMO3"             # SUMO proteins
 )
 sumo_found <- proteomics_clean %>%
@@ -188,11 +251,14 @@ head(clinical)
 
 colnames(clinical)
 
+
 sumo_long <- sumo_found[, patient_cols] %>%
   rownames_to_column("Protein") %>%
   pivot_longer(-Protein, names_to = "UPN", values_to = "Expression") %>%
   left_join(clinical, by = "UPN") %>%
-  filter(!is.na(ELN_risk))
+  filter(!is.na(ELN_risk))%>%
+  mutate(ELN_risk = factor(ELN_risk, 
+                         levels = c("Favorable", "Intermediate", "Adverse")))
 
 ggplot(sumo_long, aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
@@ -211,7 +277,17 @@ ggplot(sumo_long, aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
         axis.text.x = element_text(angle = 45, hjust = 1))
 
 
-
+sumo_long %>%
+  filter(!is.na(EFS_months)) %>%
+  group_by(Protein) %>%
+  summarise(
+    cor = cor(Expression, EFS_months, 
+              method = "spearman", use = "complete.obs"),
+    p_value = cor.test(Expression, EFS_months, 
+                       method = "spearman")$p.value
+  ) %>%
+  arrange(p_value) %>%
+  print(n = 30)
 
 
 
@@ -221,7 +297,7 @@ ggplot(sumo_long, aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
 # ── SUMO PROTEINS × ELN RISK ──────────────────────────────
 library(ggpubr)
 sumo_long %>%
-  filter(Protein %in% c("UBE2I", "SENP5")) %>%
+  filter(Protein %in% c("UBE2I", "SENP6", "TOPORS")) %>%
   filter(!is.na(ELN_risk)) %>%
   ggplot(aes(x = ELN_risk, y = Expression, fill = ELN_risk)) +
   geom_boxplot(alpha = 0.7, outlier.shape = NA) +
@@ -251,7 +327,7 @@ sumo_long %>%
 
 
 
-# ── SUMO PROTEINS × Event free survival ───────────────────────────────────
+# ── SUMO PROTEINS × EFS ───────────────────────────────────
 colnames(clinical)
 
 
@@ -263,6 +339,31 @@ ggplot(sumo_long, aes(x = EFS_months, y = Expression)) +
   labs(title = "SUMO pathway proteins vs EFS (months)",
        x = "EFS (months)", 
        y = "Protein level (log2)") +
+  theme(strip.text = element_text(face = "bold"))
+
+
+
+selected_proteins <- c("TOPORS", "PIAS1", "SENP6")
+sumo_long %>%
+  filter(Protein %in% selected_proteins) %>%
+  group_by(Protein) %>%
+  mutate(
+    rho = round(cor(Expression, EFS_months, method = "spearman", use = "complete.obs"), 3),
+    pval = cor.test(Expression, EFS_months, method = "spearman")$p.value,
+    label = paste0("Spearman rho = ", rho, "\np = ", format.pval(pval, digits = 3))
+  ) %>%
+  ggplot(aes(x = EFS_months, y = Expression)) +
+  geom_point(alpha = 0.75, size = 2.3, color = "#2C3E50") +
+  geom_smooth(method = "lm", se = TRUE, color = "#E74C3C", linewidth = 1.0) +
+  geom_text(aes(x = Inf, y = Inf, label = label),
+            hjust = 1.05, vjust = 1.8, size = 4.5, 
+            fontface = "italic", color = "black") +
+  facet_wrap(~ Protein, scales = "free_y", ncol = 3) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Association of Selected SUMO Proteins with Event-Free Survival",
+       subtitle = "TOPORS, PIAS1 and SENP6",
+       x = "Event-Free Survival (months)",
+       y = "Protein Expression Level (log2, TMT)") +
   theme(strip.text = element_text(face = "bold"))
 
 
@@ -304,8 +405,6 @@ sumo_long %>%
 
 
 
-
-
 # Create binary mutation status variables
 clinical <- clinical %>%
   mutate(
@@ -325,26 +424,31 @@ sumo_long <- sumo_found[, patient_cols] %>%
   left_join(clinical, by = "UPN")
 
 sumo_mut <- sumo_long %>%
+  filter(Protein %in% selected_proteins) %>%
   pivot_longer(
     cols = c(FLT3_status, NPM1_status, TP53_status, DNMT3A_status),
     names_to = "Gene",
     values_to = "Status"
   ) %>%
   mutate(Gene = gsub("_status", "", Gene))
+
 ggplot(sumo_mut, aes(x = Status, y = Expression, fill = Status)) +
-  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
-  geom_jitter(width = 0.15, size = 1, alpha = 0.6) +
+  geom_boxplot(alpha = 0.75, outlier.shape = NA) +
+  geom_jitter(width = 0.2, size = 1.8, alpha = 0.7, color = "#2C3E50") +
   scale_fill_manual(values = c("Mutated" = "#E74C3C", "Wild-type" = "#95A5A6")) +
   facet_grid(Protein ~ Gene, scales = "free_y") +
-  stat_compare_means(method = "wilcox.test", label = "p.signif") +
-  theme_minimal(base_size = 10) +
-  labs(title = "SUMO pathway proteins by mutation status",
-       x = "", y = "Protein level (log2)") +
+  stat_compare_means(method = "wilcox.test", label = "p.signif", size = 3.5) +
+  theme_minimal(base_size = 13) +
+  labs(title = "Association of Selected SUMO Proteins with Mutation Status",
+       subtitle = "TOPORS, PIAS1 and SENP6",
+       x = "",
+       y = "Protein Expression (log2, TMT)") +
   theme(legend.position = "none",
-        axis.text.x = element_text(angle = 45, hjust = 1))
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        strip.text = element_text(face = "bold"))
 
 
-
+# ── SUMO PROTEINS × EFS ───────────────────────────────────
 sumo_long %>%
   filter(!is.na(EFS_months)) %>%
   group_by(Protein) %>%
@@ -422,6 +526,34 @@ ggsurvplot(
 
 
 
+
+topors_data <- sumo_long %>%
+  filter(Protein == "TOPORS") %>%
+  filter(!is.na(OS_months), !is.na(OS_status)) %>%
+  mutate(
+    TOPORS_group = ifelse(Expression >= median(Expression, na.rm = TRUE),
+                          "High TOPORS", "Low TOPORS"),
+    OS_months = as.numeric(OS_months),
+    OS_status = as.numeric(OS_status)
+  )
+
+km_fit_topors <- survfit(Surv(OS_months, OS_status) ~ TOPORS_group,
+                         data = topors_data)
+
+ggsurvplot(
+  km_fit_topors,
+  data = topors_data,
+  pval = TRUE,
+  pval.method = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  palette = c("#E74C3C", "#3498DB"),
+  legend.labs = c("High TOPORS", "Low TOPORS"),
+  title = "Overall survival by TOPORS expression in AML",
+  xlab = "Time (months)",
+  ylab = "Survival probability",
+  ggtheme = theme_minimal(base_size = 14)
+)
 
 
 
@@ -512,6 +644,97 @@ ggplot(results, aes(x = logFC, y = -log10(adj.P.Val),
 
 ggsave("volcano_SENP6.pdf", width = 10, height = 8)
 
+
+
+
+# ── VOLCANO: AML vs Healthy ───────────────────────────────────────────────
+
+# 1. Підготовка груп
+group_data <- clinical_raw %>%  # використовуємо оригінальні дані, бо там є ND
+  select(UPN = `...1` or colnames(clinical_raw)[1], everything()) %>%  # якщо перший стовпець — UPN
+  mutate(
+    Group = ifelse(grepl("ND", UPN, ignore.case = TRUE), "Healthy", "AML"),
+    Group = factor(Group, levels = c("Healthy", "AML"))
+  ) %>%
+  dplyr::select(UPN, Group)
+
+# Якщо UPN називається інакше — подивись colnames(clinical_raw)
+cat("Samples in comparison:\n")
+print(table(group_data$Group))
+
+# 2. Матриця експресії
+all_sample_cols <- colnames(proteomics_mat_clean)
+patient_healthy_matrix <- proteomics_mat_clean[, all_sample_cols] %>%
+  mutate(across(everything(), as.numeric)) %>%
+  as.matrix()
+
+patient_healthy_matrix <- patient_healthy_matrix[complete.cases(patient_healthy_matrix), ]
+
+# 3. Limma analysis
+library(limma)
+
+design <- model.matrix(~ Group, 
+                       data = group_data[match(colnames(patient_healthy_matrix), group_data$UPN), ])
+
+fit <- lmFit(patient_healthy_matrix, design)
+fit2 <- eBayes(fit)
+
+# Витягуємо результати (AML - Healthy)
+results_aml <- topTable(fit2, coef = "GroupAML", number = Inf, adjust.method = "BH") %>%
+  rownames_to_column("Protein")
+
+cat("Significant proteins (adj.P < 0.05):", sum(results_aml$adj.P.Val < 0.05), "\n")
+cat("Significant proteins (|logFC| > 0.5):", sum(results_aml$adj.P.Val < 0.05 & abs(results_aml$logFC) > 0.5), "\n")
+
+# 4. Volcano Plot
+results_aml <- results_aml %>%
+  mutate(
+    significant = adj.P.Val < 0.05 & abs(logFC) > 0.5,
+    SUMO_related = Protein %in% sumo_proteins,
+    label = case_when(
+      SUMO_related ~ Protein,                                 # всі SUMO підписуємо
+      adj.P.Val < 0.001 & abs(logFC) > 1.0 ~ Protein,        # дуже значущі
+      significant & row_number() <= 20 ~ Protein,            # топ-20
+      TRUE ~ ""
+    ),
+    direction = case_when(
+      logFC > 0.5 & adj.P.Val < 0.05 ~ "Up in AML",
+      logFC < -0.5 & adj.P.Val < 0.05 ~ "Down in AML",
+      TRUE ~ "Not significant"
+    )
+  )
+
+ggplot(results_aml, aes(x = logFC, y = -log10(adj.P.Val),
+                        color = direction,
+                        size = SUMO_related,
+                        alpha = significant)) +
+  geom_point() +
+  geom_text_repel(aes(label = label),
+                  size = 4.3,
+                  fontface = "bold",
+                  max.overlaps = 50,
+                  segment.size = 0.3) +
+  scale_color_manual(values = c(
+    "Up in AML" = "#E74C3C",
+    "Down in AML" = "#3498DB",
+    "Not significant" = "grey70"
+  )) +
+  scale_size_manual(values = c("TRUE" = 5.8, "FALSE" = 2)) +
+  scale_alpha_manual(values = c("TRUE" = 0.95, "FALSE" = 0.35)) +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "grey60") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey60") +
+  theme_minimal(base_size = 15) +
+  labs(title = "Differential Protein Expression: AML vs Healthy",
+       subtitle = "SUMO pathway proteins are highlighted and labeled",
+       x = "log2 Fold Change (AML / Healthy)",
+       y = "-log10(Adjusted p-value)") +
+  theme(legend.position = "bottom")
+
+ggsave("volcano_AML_vs_Healthy.pdf", width = 12, height = 9, dpi = 300)
+
+
+
+
 # Pathway enrichment
 library(clusterProfiler)
 library(org.Hs.eg.db)
@@ -542,3 +765,4 @@ go_up <- enrichGO(gene = gene_ids_up$ENTREZID,
 dotplot(go_up, showCategory = 15,
         title = "GO Biological Processes: up in High SENP6 AML") +
   theme(axis.text.y = element_text(size = 10))
+
